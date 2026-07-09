@@ -13,15 +13,18 @@
 1. [Problem Definition](#1-problem-definition)
 2. [Solution Definition](#2-solution-definition)
 3. [Technical Requirements](#3-technical-requirements)
+   - [Grounding Strategy](#grounding-strategy)
 4. [Prioritisation](#4-prioritisation)
 5. [Roadmap](#5-roadmap)
 6. [Risks & Dependencies](#6-risks--dependencies)
+   - [Hallucination Guardrails](#hallucination-guardrails)
 7. [Evaluations](#7-evaluations)
+   - [Evaluation Strategy](#evaluation-strategy)
 8. [Responsible AI](#8-responsible-ai)
+   - [Production Readiness](#production-readiness)
 9. [Pricing](#9-pricing)
 10. [Open Questions](#10-open-questions)
 11. [Assumptions](#11-assumptions)
-12. [PRD Self-Evaluation Checklist](#12-prd-self-evaluation-checklist)
 
 ---
 
@@ -244,86 +247,21 @@ The system is built as a single-tenant web application with a React frontend, a 
 
 ### Database & Storage Setup Requirements
 
-> **Engineering rule:** The generated `database.sql` must be a single paste-and-run file that sets up the entire backend from zero — tables, triggers, indexes, RLS, Storage bucket, and Storage policies. **Nothing requires a dashboard click.** The engineering doc and implementation specs must reproduce every SQL block below verbatim.
+ContractIQ uses Supabase as its single backend platform, providing authentication, a managed PostgreSQL database, and file storage — all within one project.
 
-#### Required SQL blocks (must all appear in `database.sql`)
+**Database:** Six tables store all application data in dependency order: `contracts` (the central entity, created at upload), `key_terms` (one row per extracted term), `term_corrections` (user edits to AI output), `chat_sessions` (one per contract), `chat_messages` (individual conversation turns), and `user_feedback` (thumbs up/down ratings with optional comments). Every table enforces row-level security so each user can only read and write their own rows. Timestamps are automatically maintained via database triggers.
 
-**Block 0 — shared trigger function** (runs before any table)
-```sql
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN NEW.updated_at = now(); RETURN NEW; END;
-$$ LANGUAGE plpgsql;
-```
+**File storage:** Uploaded PDFs are stored in a private bucket scoped to each user. The full PDF text is extracted once at upload time, stored in the database with page markers, and reused by both the extraction pipeline and the chat agent — neither feature re-downloads the original file. Storage upload is non-blocking: if it fails, only the inline PDF viewer is unavailable; extraction and chat continue uninterrupted using the stored text. The PDF viewer uses time-limited signed URLs (1-hour expiry); a paginated text viewer serves as an automatic fallback when a signed URL is unavailable.
 
-**Block 1–6 — application tables** (in dependency order)
-Each table must follow this pattern:
-```sql
-CREATE TABLE IF NOT EXISTS {table} ( … );
-CREATE INDEX IF NOT EXISTS idx_{table}_{col} ON {table} ({col});
-ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
-CREATE POLICY {table}_{action}_own ON {table} FOR {action} USING (auth.uid() = user_id);
-```
-Tables in order: `contracts` → `key_terms` → `term_corrections` → `chat_sessions` → `chat_messages` → `user_feedback`
+**Access control:** Storage policies mirror database row-level security — users can only upload to, view, and delete files within their own folder path. All policies are defined in code and require no manual configuration in the Supabase dashboard.
 
-**Block 7 — Supabase Storage bucket** (must be SQL, NOT a dashboard step)
-```sql
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES ('contracts', 'contracts', false, 10485760, ARRAY['application/pdf'])
-ON CONFLICT (id) DO NOTHING;
-```
 
-**Block 8 — Storage RLS policies** (must be SQL, NOT a dashboard step)
-```sql
-CREATE POLICY "storage_insert_own_contracts"
-  ON storage.objects FOR INSERT TO authenticated
-  WITH CHECK (bucket_id = 'contracts' AND auth.uid()::text = (storage.foldername(name))[1]);
-
-CREATE POLICY "storage_select_own_contracts"
-  ON storage.objects FOR SELECT TO authenticated
-  USING (bucket_id = 'contracts' AND auth.uid()::text = (storage.foldername(name))[1]);
-
-CREATE POLICY "storage_delete_own_contracts"
-  ON storage.objects FOR DELETE TO authenticated
-  USING (bucket_id = 'contracts' AND auth.uid()::text = (storage.foldername(name))[1]);
-```
-
-**Block 9 — migration pattern** (for any column added after initial schema)
-```sql
-ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type};
-```
-Place migration blocks **at the top** of `database.sql`, before the `CREATE TABLE` statements.
-
-#### Storage rules
-- File path pattern: `contracts/{user_id}/{contract_id}/{filename}.pdf`
-- Storage upload is **non-blocking**: if it fails, only the PDF viewer is hidden; the AI pipeline (extraction + chat) uses `contract_text` from the DB and is unaffected
-- Signed URL expiry: 3600 seconds (1 hour)
-- PDF viewer has a **text viewer fallback**: when `signed_pdf_url` is null but `contract_text` exists, render the stored text with `[PAGE N]` section markers and font-size controls
-
-#### Key `contracts` table columns
-| Column | Type | Purpose |
-|---|---|---|
-| `contract_text` | `text` | Full extracted PDF text with `[PAGE N]` markers; set at upload; read by processing and chat routes |
-| `status` | `text` | `pending \| processing \| completed \| error` — drives the results page polling loop |
-| `file_path` | `text` | Supabase Storage path; nullable; only needed for the PDF viewer signed URL |
-| `error_message` | `text` | Populated when `status = 'error'`; shown on the results page with a retry button |
-
-#### database.sql completeness checklist
-The engineering doc must verify the generated file covers all of these before marking schema work done:
-- [ ] `update_updated_at()` trigger function
-- [ ] `contracts` table + indexes + RLS + `updated_at` trigger
-- [ ] `key_terms` table + indexes + RLS
-- [ ] `term_corrections` table + indexes + RLS (INSERT only for users; SELECT for service role only)
-- [ ] `chat_sessions` table + UNIQUE (contract_id) + indexes + RLS + `updated_at` trigger
-- [ ] `chat_messages` table + composite index on `(session_id, created_at)` + RLS
-- [ ] `user_feedback` table + UNIQUE (user_id, contract_id) + index + RLS
-- [ ] `INSERT INTO storage.buckets` — bucket `contracts`, private, 10 MB limit, PDF only
-- [ ] `CREATE POLICY storage_insert_own_contracts ON storage.objects`
-- [ ] `CREATE POLICY storage_select_own_contracts ON storage.objects`
-- [ ] `CREATE POLICY storage_delete_own_contracts ON storage.objects`
-- [ ] Migration block for `contract_text` column (`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS`)
 
 ---
+
+### Grounding Strategy
+
+All AI outputs are grounded strictly in the uploaded contract text. For extraction, the full contract text is passed as structured context with no general knowledge inference permitted. For chat, a retrieval-augmented approach passes the entire contract text plus conversation history on every turn; the system prompt explicitly forbids answering from general legal knowledge and mandates a `[Page X]` citation on every response.
 
 ### Prompt Strategy
 
@@ -477,6 +415,16 @@ The engineering doc must verify the generated file covers all of these before ma
 | Chat hallucination (AI answers from general knowledge, not document) | Medium | High | System prompt enforces document-only answers; automated test: feed a question about a topic not in the document, expect "I cannot find this" response |
 | Supabase RLS misconfiguration exposing user data | Low | Critical | Pre-launch security review: attempt cross-user data access from test accounts; RLS unit tests in CI pipeline |
 
+### Hallucination Guardrails
+
+| Guardrail | Implementation |
+|---|---|
+| Document-only system prompt | Chat system prompt: "Answer only from the document text provided. If the answer is not in the document, say so." General legal knowledge is explicitly forbidden |
+| Mandatory page citation | Every chat response must include a `[Page X]` tag; responses without a citation are flagged for retry |
+| Confidence warning | Any extracted term with confidence < 50% shows a ⚠️ icon and tooltip recommending manual verification — it is never hidden |
+| Null-not-fabricate policy | If the model cannot locate a term, it returns `null` for value and `0` for confidence — fabricating a plausible value is not permitted |
+| Automated groundedness eval | Monthly evaluation: 50 expert-reviewed Q&A pairs scored as Grounded / Hallucinated / Not Found; target ≤ 5% hallucinated responses |
+
 ---
 
 ## 7. Evaluations
@@ -566,6 +514,18 @@ The engineering doc must verify the generated file covers all of these before ma
 | Recovery plan if system fails | OpenAI API failure: 3-retry with backoff, then surface error to user with "Try again" CTA; contract status set to `'error'` in DB so user can retry without re-uploading. Supabase downtime: frontend shows maintenance banner; no data loss risk as all writes are transactional |
 | How is system health monitored | Vercel deployment logs; Supabase dashboard for DB and storage metrics; OpenAI usage dashboard for token consumption and error rates; Uptime Robot for endpoint monitoring with alerts to team Slack |
 | Customer communication plan | P0 incident (data exposure, complete outage): in-app banner + email to all affected users within 1 hour; status page updated within 30 minutes. P1 incident (degraded performance): in-app banner within 2 hours |
+
+### Production Readiness
+
+| Checkpoint | Requirement | Status |
+|---|---|---|
+| Security audit | RLS policies verified by cross-user penetration test; signed URL expiry confirmed at 3600s; OpenAI API key confirmed server-side only | Pre-launch |
+| Rate limiting | OpenAI API calls rate-limited per user per minute; file upload endpoint limited to 10 requests/minute | v1.0 |
+| Performance baseline | P95 end-to-end latency ≤ 30s confirmed on 50-contract benchmark; chat response ≤ 15s P95 | v1.0 |
+| Accessibility | WCAG 2.1 AA audit passed; all interactive elements keyboard-navigable; confidence colours supplemented with icons | v1.0 |
+| Legal & compliance | "Not legal advice" disclaimer reviewed by solicitor; GDPR DPA confirmed with Supabase and OpenAI; data deletion flow tested | Pre-launch |
+| Observability | Vercel deployment logs, Supabase metrics, OpenAI usage dashboard, and Uptime Robot alerts all active | v1.0 |
+| Supabase Pro | Project migrated from free tier to Pro plan; storage and DB limits confirmed sufficient for beta volume | Pre-launch |
 
 ---
 
@@ -674,46 +634,3 @@ The following assumptions were made to produce a complete PRD. Each is a risk it
 13. **The Supabase Storage bucket and its RLS policies are created via SQL**, not via the Supabase dashboard. The `database.sql` file must include `INSERT INTO storage.buckets` and three `CREATE POLICY ON storage.objects` statements (INSERT, SELECT, DELETE). If these are omitted from the SQL file, PDF uploads will silently fail — the upload route will catch the storage error, leave `file_path = null`, and the PDF viewer will not render. The text viewer fallback will still work because `contract_text` is stored independently in the DB.
 14. **The full conversation history is passed to the chat model on every turn**, not just the last 10 messages. The chat route fetches all messages for the session (up to 200) in ascending order and passes them as the message array. This enables memory-style questions ("what did you say earlier about X?"). The query classification layer (`contract` / `history` / `both`) adjusts the system prompt and context inclusion without an extra API call.
 
----
-
-## 12. PRD Self-Evaluation Checklist
-
-This PRD is validated against the standard PRD checklist covering Problem Definition, Solution Definition, and Core Metrics. Every item is mapped to the section that satisfies it so the document can be audited at a glance.
-
-**Overall: 16 / 16 items passing.**
-
-### Section 1 — Problem Definition (8/8)
-
-| # | Criterion | Status | Where it's covered |
-|---|---|---|---|
-| 1.1 | Problem & job-to-be-done clearly articulated | ✅ | §1 "What problem is this solving?" — 90–120 min manual review, missed obligations, no in-house legal |
-| 1.2 | Customer persona(s) defined with role, industry, needs | ✅ | §1 Primary persona (Time-Pressed Founder/Ops Lead) + Secondary persona (Freelancer/Consultant), each with industry, role, behaviour, pain |
-| 1.3 | Problem validated with real data or market research | ✅ | §1 "Why is this problem worth solving?" — legal tech market $25.9B, 43% SMB dispute stat, $1,500–3,000 review cost |
-| 1.4 | Why this problem is worth solving for this user | ✅ | §1 quantified pain (time + cost per contract) and frequency (5–15 contracts/month) |
-| 1.5 | Clear and defensible MOAT defined | ✅ | §1 MOAT — contract-type specificity, feedback loop, confidence transparency, chat grounded in document |
-| 1.6 | Justification for Agentic AI over rule-based systems | ✅ | §1 "Why Agentic AI?" — clause variant diversity, >30% regex miss rate |
-| 1.7 | Unstructured data types listed + need for ML/LLMs explained | ✅ | §1 "Why Agentic AI?" — free-form legal prose across NDAs/MSAs; why LLMs are necessary |
-| 1.8 | Differentiated from ChatGPT, Copilots, or similar | ✅ | §1 "Why not just ChatGPT?" + market gap vs DocuSign CLM, Ironclad, Kira |
-
-### Section 2 — Solution Definition (4/4)
-
-| # | Criterion | Status | Where it's covered |
-|---|---|---|---|
-| 2.1 | Visual user flow included (input → processing → output) | ✅ | §2 User Flows 1–4 with step-by-step flow diagrams |
-| 2.2 | AI drawbacks addressed (hallucination, explainability, etc.) | ✅ | §2 Flow 3 hallucination safeguard + explainability; §8 Responsible AI; §6 chat hallucination risk |
-| 2.3 | Core functional requirements in user story format | ✅ | §2 User Stories US-001–US-012 in "As a… I want… so that…" format |
-| 2.4 | Agent capabilities and system behaviour clearly described | ✅ | §2 "Agent Capabilities & System Behaviour" table with autonomy levels + human-in-loop triggers |
-
-### Section 3 — Core Metrics (4/4)
-
-| # | Criterion | Status | Where it's covered |
-|---|---|---|---|
-| 3.1 | North Star metric defined | ✅ | §1 North Star — avg time from upload to completed key-term review (≤ 15 min) |
-| 3.2 | 1–2 primary metrics listed | ✅ | §1 Primary Metrics — extraction F1 (≥ 88%), confidence calibration, time to first term |
-| 3.3 | Secondary/supporting metrics included | ✅ | §1 Secondary Metrics — 30-day retention, NPS, contracts/user/month, correction rate, cost/analysis |
-| 3.4 | Metrics are measurable and trackable over time | ✅ | §1 each metric has baseline, target, and tracking method (session logs, eval suite, Supabase analytics) |
-
-### Strengths
-- **Metrics rigor:** every metric carries a baseline, target, and a concrete tracking mechanism.
-- **Trust-by-design:** confidence scoring, source-sentence explainability, and document-grounded chat directly answer the top AI adoption risks.
-- **Build-ready:** §3 database/storage requirements and §4 component risk assessment make the PRD executable, not just aspirational.
