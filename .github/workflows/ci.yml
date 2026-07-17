@@ -1,0 +1,61 @@
+name: CI
+
+# Job wiring per docs/specs/14-testing-spec.md §7.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: Vitest unit + component
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contractiq
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: contractiq/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  e2e:
+    name: Playwright E2E (core flows + hallucination regression)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: contractiq
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+      E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+      E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
+      FIXTURE_CONTRACT_ID: ${{ secrets.FIXTURE_CONTRACT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: contractiq/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npx next start & npx wait-on http://localhost:3000
+      - run: npx playwright test
+
+  rls:
+    name: pgTAP RLS suite
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'docs/specs/supabase-schema.sql') || contains(github.event.head_commit.modified, 'supabase/migrations/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: supabase test db
