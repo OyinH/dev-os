@@ -52,7 +52,45 @@ alter table user_feedback      enable row level security;
 alter table term_corrections   enable row level security;
 
 -- ----------------------------------------------------------------------------
--- 3. Verification query — run manually after applying this file
+-- 3. v_correction_rate_7d — close the Security Definer View gap
+-- ----------------------------------------------------------------------------
+-- Postgres views run with the *creator's* privileges unless security_invoker
+-- is explicitly set — for a view with no such setting, that means it bypasses
+-- RLS on every table it selects from entirely, regardless of who queries it.
+-- This view was originally created without it, so any authenticated user
+-- calling GET /rest/v1/v_correction_rate_7d saw the platform-wide correction
+-- rate across every user's data, not just their own — flagged CRITICAL by
+-- Supabase's database linter ("Security Definer View"). It's meant to be
+-- read only by an internal alerting job via the service-role key (which
+-- bypasses RLS regardless of this setting), never by a regular user session.
+alter view v_correction_rate_7d set (security_invoker = true);
+revoke select on v_correction_rate_7d from anon, authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 4. Lock down SECURITY DEFINER functions + pin search_path
+-- ----------------------------------------------------------------------------
+-- retention_cleanup() is SECURITY DEFINER with no execute restriction — the
+-- default PUBLIC grant means ANY caller, including unauthenticated anon,
+-- could call POST /rest/v1/rpc/retention_cleanup directly and force a mass
+-- delete of every user's contracts on demand. It's meant to run only via the
+-- pg_cron job below (which invokes it in-process, not through PostgREST), so
+-- revoking anon/authenticated access does not affect the real daily job.
+revoke execute on function retention_cleanup() from public, anon, authenticated;
+
+-- log_term_correction() is RETURNS trigger, so Postgres already refuses to
+-- call it outside trigger context — but it still shows up as a "SECURITY
+-- DEFINER function callable by anon" linter finding via the default PUBLIC
+-- grant. Revoke explicitly rather than rely on that runtime restriction.
+revoke execute on function log_term_correction() from public, anon, authenticated;
+
+-- Pin search_path on every function so an attacker-controlled search_path
+-- can't shadow an unqualified table/function reference inside them.
+alter function set_updated_at() set search_path = public;
+alter function enforce_custom_term_limit() set search_path = public;
+alter function touch_contract_access(uuid) set search_path = public;
+
+-- ----------------------------------------------------------------------------
+-- 5. Verification query — run manually after applying this file
 -- ----------------------------------------------------------------------------
 -- Expected: every row below shows rowsecurity = true. Any table missing from
 -- this list, or showing `false`, is a security gap that must be fixed before

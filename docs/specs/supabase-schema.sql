@@ -20,6 +20,7 @@ create extension if not exists "pg_cron";    -- retention-cleanup schedule
 create or replace function set_updated_at()
 returns trigger
 language plpgsql
+set search_path = public
 as $$
 begin
   new.updated_at = now();
@@ -135,6 +136,7 @@ create policy "custom_key_terms_all_own_via_contract" on custom_key_terms for al
 create or replace function enforce_custom_term_limit()
 returns trigger
 language plpgsql
+set search_path = public
 as $$
 declare
   existing_count int;
@@ -288,8 +290,22 @@ create trigger trg_log_term_correction_custom_key_terms
   after update on custom_key_terms
   for each row execute function log_term_correction();
 
+-- Postgres already refuses to call a RETURNS trigger function outside
+-- trigger context, but the default PUBLIC execute grant still shows up as a
+-- "SECURITY DEFINER function callable by anon" linter finding. Revoke it
+-- explicitly rather than rely on that runtime restriction as the only guard.
+revoke execute on function log_term_correction() from public, anon, authenticated;
+
 -- Rolling 7-day correction-rate view (PRD §8/§10: >12% triggers a prompt review)
-create or replace view v_correction_rate_7d as
+-- Platform-wide aggregate for the alerting job's service-role query — never
+-- meant to be readable by a regular user's session. security_invoker = true
+-- (not the Postgres default) makes it run as the querying role rather than
+-- the view owner, so RLS on the underlying tables is actually enforced
+-- instead of silently bypassed; the REVOKE below is the belt-and-suspenders
+-- layer in case a future recreate drops that setting (see
+-- supabase/rls-policies.sql, applied idempotently to the live project too).
+create or replace view v_correction_rate_7d
+with (security_invoker = true) as
 select
   coalesce(corrections.cnt, 0)::numeric as corrections_last_7d,
   coalesce(terms.cnt, 0)::numeric as terms_created_last_7d,
@@ -307,6 +323,8 @@ from
     ) all_terms
   ) terms;
 
+revoke select on v_correction_rate_7d from anon, authenticated;
+
 -- ============================================================================
 -- 9. touch_contract_access RPC (drives 90-day retention window)
 -- ============================================================================
@@ -314,6 +332,7 @@ create or replace function touch_contract_access(p_contract_id uuid)
 returns void
 language plpgsql
 security invoker
+set search_path = public
 as $$
 begin
   update contracts
@@ -339,6 +358,14 @@ begin
   where last_accessed_at < now() - interval '90 days';
 end;
 $$;
+
+-- SECURITY DEFINER + the default PUBLIC execute grant means, without this,
+-- ANY caller — including unauthenticated anon — could hit
+-- /rest/v1/rpc/retention_cleanup directly and force a mass delete across
+-- every user's contracts on demand. pg_cron below invokes this in-process
+-- (as the scheduling role), never through PostgREST, so revoking anon/
+-- authenticated access does not affect the actual daily job.
+revoke execute on function retention_cleanup() from public, anon, authenticated;
 
 -- Runs daily at 03:00 UTC. Requires pg_cron enabled on the project (Database > Extensions).
 select cron.schedule(
