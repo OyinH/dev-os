@@ -1,18 +1,54 @@
+import Link from 'next/link'
+import { Button } from '@/components/ui/Button'
+
+const FEATURES = [
+  {
+    title: 'AI-extracted key terms',
+    description: 'Upload an NDA or MSA and get standard terms extracted with page-cited evidence.',
+  },
+  {
+    title: 'Ask questions, grounded',
+    description: 'Chat about a contract and get answers sourced from the document — or say so plainly.',
+  },
+  {
+    title: 'Review, edit, trust',
+    description: 'Every extraction shows its confidence and source sentence, so you always know why.',
+  },
+]
+
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-[#0f0c29] via-[#302b63] to-[#24243e] px-8 py-8 text-center text-white">
-      <h1 className="mb-4 bg-gradient-to-r from-[#00c6ff] to-[#a78bfa] bg-clip-text text-6xl font-extrabold text-transparent">
-        Hello, ContractIQ 🚀
-      </h1>
-      <p className="mb-8 max-w-xl text-xl leading-relaxed text-[#a8b2d8]">
-        Your Next.js 14 app is up and running with the App Router. Let&apos;s build something amazing.
-      </p>
-      <a
-        href="/sign-up"
-        className="inline-block rounded-full bg-[#00c6ff] px-8 py-3 text-base font-bold text-[#0f0c29] transition-transform hover:scale-105"
-      >
-        Get Started
-      </a>
+    <main className="flex min-h-screen flex-col bg-surface-bg">
+      <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col items-center justify-center gap-xl px-md py-3xl text-center">
+        <div className="flex flex-col gap-sm">
+          <h1 className="text-display text-text-primary">ContractIQ</h1>
+          <p className="mx-auto max-w-xl text-body-lg text-text-secondary">
+            AI-powered contract review. Upload an NDA or MSA, get key terms extracted with page citations, and ask
+            questions grounded in the document.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-sm">
+          <Link href="/sign-up">
+            <Button>Get started</Button>
+          </Link>
+          <Link href="/sign-in">
+            <Button variant="ghost">Sign in</Button>
+          </Link>
+        </div>
+
+        <div className="grid w-full grid-cols-1 gap-md sm:grid-cols-3">
+          {FEATURES.map((feature) => (
+            <div
+              key={feature.title}
+              className="flex flex-col gap-xs rounded-card border border-border bg-surface-elevated p-lg text-left"
+            >
+              <h2 className="text-h4 text-text-primary">{feature.title}</h2>
+              <p className="text-body text-text-secondary">{feature.description}</p>
+            </div>
+          ))}
+        </div>
+      </div>
     </main>
   )
 }
