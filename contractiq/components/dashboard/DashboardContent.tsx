@@ -5,24 +5,15 @@ import { useContracts } from '@/hooks/useContracts'
 import { SummaryCards } from './SummaryCards'
 import { ContractListTable } from './ContractListTable'
 import { Button } from '@/components/ui/Button'
-import { SignOutButton } from '@/components/auth/SignOutButton'
 
 export function DashboardContent({ email }: { email: string }) {
   const { data: contracts, isLoading, isError } = useContracts()
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-lg px-md py-3xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-h2 text-text-primary">Dashboard</h1>
-          <p className="text-body text-text-secondary">Signed in as {email}</p>
-        </div>
-        <div className="flex items-center gap-sm">
-          <Link href="/upload">
-            <Button>Upload a contract</Button>
-          </Link>
-          <SignOutButton />
-        </div>
+    <div className="mx-auto flex max-w-4xl flex-col gap-lg px-md py-3xl">
+      <div>
+        <h1 className="text-h2 text-text-primary">Dashboard</h1>
+        <p className="text-body text-text-secondary">Signed in as {email}</p>
       </div>
 
       {isLoading && <p className="text-body text-text-muted">Loading contracts…</p>}
@@ -44,6 +35,6 @@ export function DashboardContent({ email }: { email: string }) {
           <ContractListTable contracts={contracts} />
         </>
       )}
-    </main>
+    </div>
   )
 }

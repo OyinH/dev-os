@@ -20,11 +20,11 @@ export default async function ContractPage({ params }: { params: { contractId: s
   if (fetchError || !contract) notFound()
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-md px-md py-3xl">
+    <div className="mx-auto flex max-w-6xl flex-col gap-md px-md py-3xl">
       <Link href="/dashboard" className="text-body text-brand hover:underline">
         ← Back to dashboard
       </Link>
       <ContractWorkspace contractId={contract.id} />
-    </main>
+    </div>
   )
 }

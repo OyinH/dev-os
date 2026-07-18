@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/Button'
 
-export function SignOutButton() {
+export function SignOutButton({ className = '' }: { className?: string }) {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
 
@@ -16,7 +16,7 @@ export function SignOutButton() {
   }
 
   return (
-    <Button variant="ghost" loading={loading} onClick={handleSignOut}>
+    <Button variant="ghost" loading={loading} onClick={handleSignOut} className={className}>
       Sign out
     </Button>
   )
